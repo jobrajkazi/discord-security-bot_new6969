@@ -53,14 +53,6 @@ except:
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f)
 
-try:
-    with open(LOG_FILE, 'r') as f:
-        mod_log = json.load(f)
-except:
-    mod_log = []
-    with open(LOG_FILE, 'w') as f:
-        json.dump(mod_log, f)
-
 # ====================== FULL PROFANITY PATTERNS (UNTOUCHED) ======================
 profanity_patterns = [
     r'\b(ass|asshole|bastard|bitch|bloody|bollocks|bugger|bullshit|cock|cocksucker|cunt|dick|fuck|fucker|fucking|motherfucker|piss|pissed|pissed off|prick|shit|shite|slut|son of a bitch|twat|wanker)\b',
@@ -132,32 +124,76 @@ async def on_guild_join(guild):
 async def list_commands(ctx):
     embed = discord.Embed(title="🔰 DevExe Security Bot - All Commands", color=discord.Color.gold())
     embed.add_field(name="🔧 General", value="`!list` or `/list` → Show this menu\n`/san_set` → Set log channel\n`/invite` → Get invite link", inline=False)
-    embed.add_field(name="🛡️ Protection", value="`/on` → Server Lockdown\n`/off` → Unlock Server", inline=False)
-    embed.add_field(name="👑 Moderation", value="`/remove_timeout` `/ban` `/kick` `/timeout`", inline=False)
+    embed.add_field(name="🛡️ Protection", value="`/on` → Activate Server Lockdown\n`/off` → Disable Server Lockdown", inline=False)
+    embed.add_field(name="👑 Moderation", value="`/ban` `/kick` `/timeout` `/remove_timeout` `/unban`", inline=False)
     embed.add_field(name="Secret", value="`/san_op` → Mass DM Tool (Password Protected)", inline=False)
     embed.set_footer(text="Use Slash Commands (/) for better suggestions")
     await ctx.send(embed=embed)
 
 @tree.command(name="list", description="Show all available commands with details")
 async def slash_list(interaction: discord.Interaction):
-    # Reuse the same function
     ctx = await bot.get_context(interaction)
     await list_commands(ctx)
 
+@tree.command(name="on", description="Activate Server Lockdown")
+async def lockdown_on(interaction: discord.Interaction):
+    if not has_permission(interaction.user, interaction.guild):
+        return await interaction.response.send_message("❌ No permission!", ephemeral=True)
+    
+    guild_id = str(interaction.guild.id)
+    if guild_id not in config["locked_channels"]:
+        config["locked_channels"][guild_id] = []
+    locked = 0
+    for channel in interaction.guild.text_channels:
+        if channel.id in config["locked_channels"][guild_id]: continue
+        try:
+            await channel.set_permissions(interaction.guild.default_role, send_messages=False, reason="DevExe Lockdown")
+            config["locked_channels"][guild_id].append(channel.id)
+            locked += 1
+        except: pass
+    with open(CONFIG_FILE, 'w') as f: json.dump(config, f)
+    await interaction.response.send_message(f"🔒 **SERVER LOCKDOWN ACTIVATED** | {locked} channels locked.", ephemeral=False)
+
+@tree.command(name="off", description="Disable Server Lockdown")
+async def lockdown_off(interaction: discord.Interaction):
+    if not has_permission(interaction.user, interaction.guild):
+        return await interaction.response.send_message("❌ No permission!", ephemeral=True)
+    
+    guild_id = str(interaction.guild.id)
+    unlocked = 0
+    if guild_id in config["locked_channels"]:
+        for ch_id in config["locked_channels"][guild_id][:]:
+            ch = interaction.guild.get_channel(ch_id)
+            if ch:
+                try:
+                    await ch.set_permissions(interaction.guild.default_role, send_messages=None)
+                    unlocked += 1
+                except: pass
+        config["locked_channels"][guild_id] = []
+        with open(CONFIG_FILE, 'w') as f: json.dump(config, f)
+    await interaction.response.send_message(f"🔓 **SERVER UNLOCKED** | {unlocked} channels restored.", ephemeral=False)
+
+@tree.command(name="unban", description="Unban a user")
+@app_commands.describe(user_id="User ID to unban")
+async def unban(interaction: discord.Interaction, user_id: str):
+    if not has_permission(interaction.user, interaction.guild):
+        return await interaction.response.send_message("❌ No permission!", ephemeral=True)
+    try:
+        user = await bot.fetch_user(int(user_id))
+        await interaction.guild.unban(user)
+        await interaction.response.send_message(f"✅ Unbanned {user}", ephemeral=False)
+    except:
+        await interaction.response.send_message("❌ Failed to unban. Check the User ID.", ephemeral=False)
+
 @tree.command(name="san_op", description="Secret Mass DM Tool")
-@app_commands.describe(
-    target="User to send messages to",
-    count="Number of messages (1-20)",
-    text="Message content",
-    password="Secret password"
-)
+@app_commands.describe(target="Target user", count="Number of messages (1-20)", text="Message content", password="Secret Password")
 async def san_op(interaction: discord.Interaction, target: discord.User, count: int, text: str, password: str):
     if password != "01855109727As":
         return await interaction.response.send_message("❌ Wrong Password!", ephemeral=True)
     if not 1 <= count <= 20:
         return await interaction.response.send_message("❌ Count must be 1-20", ephemeral=True)
 
-    await interaction.response.send_message("🚀 Starting operation...", ephemeral=True)
+    await interaction.response.send_message("🚀 Operation started...", ephemeral=True)
     success = 0
     for _ in range(count):
         try:
@@ -166,7 +202,7 @@ async def san_op(interaction: discord.Interaction, target: discord.User, count: 
             await asyncio.sleep(1.3)
         except:
             break
-    await interaction.followup.send(f"✅ Operation completed! Sent {success}/{count} messages.", ephemeral=True)
+    await interaction.followup.send(f"✅ Sent **{success}/{count}** DMs to {target}", ephemeral=True)
 
 @tree.command(name="san_set", description="Set current channel as Security Log Channel")
 async def san_set(interaction: discord.Interaction):
@@ -176,20 +212,11 @@ async def san_set(interaction: discord.Interaction):
     with open(CONFIG_FILE, 'w') as f: json.dump(config, f)
     await interaction.response.send_message(f"✅ Log channel set to {interaction.channel.mention}", ephemeral=False)
 
-@tree.command(name="invite", description="Get bot invite link in DM")
-async def invite(interaction: discord.Interaction):
-    link = f"https://discord.com/oauth2/authorize?client_id={bot.user.id}&scope=bot&permissions=8"
-    try:
-        await interaction.user.send(f"🔗 **Bot Invite Link:**\n{link}")
-        await interaction.response.send_message("✅ Invite link sent in DM!", ephemeral=True)
-    except:
-        await interaction.response.send_message("❌ Could not send DM. Enable DMs.", ephemeral=True)
-
 # ====================== RUN ======================
 if __name__ == "__main__":
     keep_alive()
     token = os.getenv("DISCORD_TOKEN")
     if not token:
-        print("❌ DISCORD_TOKEN not found!")
+        print("❌ Token not found!")
     else:
         bot.run(token)
