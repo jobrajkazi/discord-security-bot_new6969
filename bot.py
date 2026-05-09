@@ -300,4 +300,4 @@ if __name__ == "__main__":
     if not token:
         print("❌ DISCORD_TOKEN environment variable not found!")
     else:
-        bot.run(MTUwMTk5ODIwMjI5ODMwMjU3NA.GjAHTf.utdWZ-1Wtc6nXeRSzfT856xBsxXujj6TPB-I28)
+        bot.run(token)
