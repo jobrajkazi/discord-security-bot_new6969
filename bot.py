@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 import os
 import json
 import datetime
@@ -15,13 +16,13 @@ intents.members = True
 intents.dm_messages = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
+tree = app_commands.CommandTree(bot)
 
-# Data storage files
+# Data storage
 WHITELIST_FILE = 'whitelist.json'
 CONFIG_FILE = 'config.json'
 LOG_FILE = 'moderation_log.json'
 
-# Initialize data structures
 try:
     with open(WHITELIST_FILE, 'r') as f:
         whitelist = json.load(f)
@@ -37,11 +38,7 @@ except:
     config = {
         "spam_threshold": 5,
         "spam_timeframe": 10,
-        "punishment_levels": {
-            "spam": "timeout",
-            "profanity": "timeout",
-            "severe": "kick"
-        },
+        "punishment_levels": {"spam": "timeout", "profanity": "timeout", "severe": "kick"},
         "timeout_duration": 300,
         "notification_channel": None
     }
@@ -56,7 +53,7 @@ except:
     with open(LOG_FILE, 'w') as f:
         json.dump(mod_log, f)
 
-# Profanity filter (Big Multi-language List)
+# Profanity Patterns
 profanity_patterns = [
     r'\b(ass|asshole|bastard|bitch|bloody|bollocks|bugger|bullshit|cock|cocksucker|cunt|dick|fuck|fucker|fucking|motherfucker|piss|pissed|pissed off|prick|shit|shite|slut|son of a bitch|twat|wanker)\b',
     r'\b(puta|puto|mierda|pendejo|pendeja|joder|coño|carajo|hijueputa|hijo de puta|maricón|marica|chinga|chingada|culero|pendejo|pendeja|güevón|güevona|pajero|pajera|concha|conchatumadre)\b',
@@ -90,214 +87,145 @@ profanity_patterns = [
     r'\b(kao|diu|luk|gau|gong|ham ga chaan|hai|sei lo mo|tsat|lan yeung|diu lei)\b',
     r'\b(kuso|chikusho|yarou|bakayarou|ahou|take|kuso|yarou|chikushou|bakayarou)\b',
     r'\b(ssibal|kkaesaekki|jotbal|michinnyeon|jil|nom|nyeon|saekki|shibal|gae|miyeon|nom|sseon|nyeon)\b',
-    r'\b(deo|lon|cak|may|cho|di|me|con|du|ma|may|tang|na|lon|me|may|lon|me|may)\b',
     r'\b(ai khwai|maeng|hee|khway|kee|nok|hee|khway|maeng|hee|khway|madarirpola)\b'
 ]
 
-# Spam detection
 spam_tracker = {}
 
-# Bot events
+# ====================== PERMISSION CHECK ======================
+def has_permission(member, guild):
+    if guild.owner and member.id == guild.owner.id:
+        return True
+    bot_king = discord.utils.get(guild.roles, name="Bot King")
+    if bot_king and bot_king in member.roles:
+        return True
+    return str(member.id) in whitelist.get("admins", [])
+
+# ====================== EVENTS ======================
 @bot.event
 async def on_ready():
-    print(f'{bot.user.name} has connected to Discord!')
-    print(f'Bot is in {len(bot.guilds)} servers')
+    await tree.sync()
+    print(f'{bot.user.name} is online!')
+
+@bot.event
+async def on_guild_join(guild):
+    # Create Bot King Role
+    if not discord.utils.get(guild.roles, name="Bot King"):
+        await guild.create_role(name="Bot King", color=discord.Color.gold(), permissions=discord.Permissions(administrator=True))
     
-    for guild in bot.guilds:
-        await setup_control_panel(guild)
+    # Create Security Admin Role
+    if not discord.utils.get(guild.roles, name="Security Admin"):
+        await guild.create_role(name="Security Admin", color=discord.Color.red())
+
+    if guild.owner and str(guild.owner.id) not in whitelist["admins"]:
+        whitelist["admins"].append(str(guild.owner.id))
+        with open(WHITELIST_FILE, 'w') as f:
+            json.dump(whitelist, f)
+
+    await setup_control_panel(guild)
 
 @bot.event
 async def on_message(message):
-    if message.author == bot.user:
-        return
-    
-    if str(message.author.id) in whitelist["admins"] or str(message.author.id) in whitelist["immune"]:
-        return
-    
+    if message.author == bot.user: return
     await bot.process_commands(message)
-    await check_spam(message)
-    await check_content(message)
+    if not has_permission(message.author, message.guild):
+        await check_spam(message)
+        await check_content(message)
 
+# ====================== SLASH COMMAND ======================
+@tree.command(name="san_set", description="Set current channel as Security Bot Log Channel")
+async def san_set(interaction: discord.Interaction):
+    if not has_permission(interaction.user, interaction.guild):
+        return await interaction.response.send_message("❌ No permission!", ephemeral=True)
+    config["notification_channel"] = str(interaction.channel_id)
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f)
+    await interaction.response.send_message(f"✅ Log channel set to {interaction.channel.mention}", ephemeral=False)
+
+# ====================== !LIST COMMAND ======================
+@bot.command(name='list')
+async def list_commands(ctx):
+    embed = discord.Embed(
+        title="🔰 Security Bot - All Commands",
+        description="Here are all available commands:",
+        color=discord.Color.gold()
+    )
+    
+    embed.add_field(
+        name="🔧 Setup Commands",
+        value="`!setup` → Create control panel\n"
+              "`/san_set` → Set log channel (recommended)\n"
+              "`!list` → Show this message",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="👑 Admin Commands (Bot King / Owner)",
+        value="`!addadmin @user` → Add bot admin\n"
+              "`!removeadmin @user` → Remove bot admin\n"
+              "`!unban <user_id>` → Unban user\n"
+              "`!ban @user` → Ban user (add this if needed)",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🛡️ Auto Moderation",
+        value="• Auto detects spam & profanity\n"
+              "• Auto timeout/kick on violation\n"
+              "• Immune to Bot King & Admins",
+        inline=False
+    )
+    
+    embed.set_footer(text="Only Bot King role + Server Owner have full access")
+    await ctx.send(embed=embed)
+
+# ====================== OTHER FUNCTIONS ======================
 async def check_spam(message):
     user_id = str(message.author.id)
     current_time = datetime.datetime.now().timestamp()
-    
     if user_id not in spam_tracker:
         spam_tracker[user_id] = []
-    
     spam_tracker[user_id].append(current_time)
     spam_tracker[user_id] = [t for t in spam_tracker[user_id] if current_time - t <= config["spam_timeframe"]]
     
     if len(spam_tracker[user_id]) > config["spam_threshold"]:
         await punish_user(message.author, message.guild, "spam", message.channel)
-        await notify_user(message.author, "spam", message.guild)
-        await log_action(message.author, "spam", message.channel)
-        await notify_admins(message.guild, f"User {message.author.mention} was punished for spam in {message.channel.mention}")
+        await notify_admins(message.guild, f"🚨 Spam → {message.author.mention}")
 
 async def check_content(message):
     content = message.content.lower()
-    
     for pattern in profanity_patterns:
         if re.search(pattern, content, re.IGNORECASE):
             await punish_user(message.author, message.guild, "profanity", message.channel)
-            await notify_user(message.author, "profanity", message.guild)
-            await log_action(message.author, "profanity", message.channel)
-            await notify_admins(message.guild, f"User {message.author.mention} was punished for profanity in {message.channel.mention}")
+            await notify_admins(message.guild, f"🚨 Profanity → {message.author.mention}")
             await message.delete()
             break
 
 async def punish_user(user, guild, violation_type, channel):
-    punishment = config["punishment_levels"].get(violation_type, "timeout")
-    
-    if punishment == "timeout":
-        try:
-            await user.timeout(datetime.timedelta(seconds=config["timeout_duration"]))
-        except:
-            await channel.send(f"Could not timeout {user.mention}. Missing permissions.")
-    elif punishment == "kick":
-        try:
-            await user.kick(reason=f"Automated punishment for {violation_type}")
-        except:
-            await channel.send(f"Could not kick {user.mention}. Missing permissions.")
-    elif punishment == "ban":
-        try:
-            await user.ban(reason=f"Automated punishment for {violation_type}")
-        except:
-            await channel.send(f"Could not ban {user.mention}. Missing permissions.")
-
-async def notify_user(user, violation_type, guild):
     try:
-        if violation_type == "spam":
-            message = f"You have been timed out for 5 minutes in {guild.name} for spamming messages."
-        elif violation_type == "profanity":
-            message = f"You have been timed out for 5 minutes in {guild.name} for using profanity."
-        
-        await user.send(message)
+        if violation_type == "timeout":
+            await user.timeout(datetime.timedelta(seconds=config["timeout_duration"]))
+        elif violation_type == "kick":
+            await user.kick(reason=f"Auto {violation_type}")
+        elif violation_type == "ban":
+            await user.ban(reason=f"Auto {violation_type}")
     except:
         pass
-
-async def log_action(user, action, channel):
-    log_entry = {
-        "user_id": str(user.id),
-        "username": str(user),
-        "action": action,
-        "channel_id": str(channel.id),
-        "channel_name": channel.name,
-        "timestamp": datetime.datetime.now().isoformat()
-    }
-    
-    mod_log.append(log_entry)
-    with open(LOG_FILE, 'w') as f:
-        json.dump(mod_log, f)
 
 async def notify_admins(guild, message):
-    notification_channel_id = config.get("notification_channel")
-    
-    if notification_channel_id:
-        notification_channel = bot.get_channel(int(notification_channel_id))
-        if notification_channel:
-            await notification_channel.send(message)
-            return
-    
-    for channel in guild.text_channels:
-        if "admin" in channel.name.lower() or "mod" in channel.name.lower():
-            await channel.send(message)
-            return
-    
-    try:
-        await guild.owner.send(message)
-    except:
-        pass
+    if config.get("notification_channel"):
+        ch = bot.get_channel(int(config["notification_channel"]))
+        if ch:
+            await ch.send(message)
 
 async def setup_control_panel(guild):
-    control_panel_channel = None
-    for channel in guild.text_channels:
-        if channel.name == "security-bot-control":
-            control_panel_channel = channel
-            break
-    
-    if not control_panel_channel:
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, embed_links=True)
-        }
-        
-        for admin_id in whitelist["admins"]:
-            member = guild.get_member(int(admin_id))
-            if member:
-                overwrites[member] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        
-        control_panel_channel = await guild.create_text_channel(
-            "security-bot-control",
-            overwrites=overwrites
-        )
-        
-        embed = discord.Embed(
-            title="Security Bot Control Panel",
-            description="Use the buttons below to manage the security bot",
-            color=discord.Color.blue()
-        )
-        
-        await control_panel_channel.send(embed=embed)
+    pass  # You can expand later
 
-# Admin commands
-@bot.command(name='addadmin')
-async def add_admin(ctx, user: discord.User):
-    if str(ctx.author.id) not in whitelist["admins"]:
-        return await ctx.send("You don't have permission to use this command.")
-    
-    if str(user.id) not in whitelist["admins"]:
-        whitelist["admins"].append(str(user.id))
-        with open(WHITELIST_FILE, 'w') as f:
-            json.dump(whitelist, f)
-        await ctx.send(f"{user.mention} has been added to the admin whitelist.")
-    else:
-        await ctx.send(f"{user.mention} is already an admin.")
-
-@bot.command(name='removeadmin')
-async def remove_admin(ctx, user: discord.User):
-    if str(ctx.author.id) not in whitelist["admins"]:
-        return await ctx.send("You don't have permission to use this command.")
-    
-    if str(user.id) in whitelist["admins"]:
-        whitelist["admins"].remove(str(user.id))
-        with open(WHITELIST_FILE, 'w') as f:
-            json.dump(whitelist, f)
-        await ctx.send(f"{user.mention} has been removed from the admin whitelist.")
-    else:
-        await ctx.send(f"{user.mention} is not an admin.")
-
-@bot.command(name='unban')
-async def unban_user(ctx, user_id: int):
-    if str(ctx.author.id) not in whitelist["admins"]:
-        return await ctx.send("You don't have permission to use this command.")
-    
-    try:
-        user = await bot.fetch_user(user_id)
-        await ctx.guild.unban(user, reason="Unbanned by security bot admin command")
-        await ctx.send(f"✅ Successfully unbanned **{user}**.")
-        await log_action(user, "unban", ctx.channel)
-        await notify_admins(ctx.guild, f"🔓 {ctx.author.mention} unbanned {user}.")
-    except discord.NotFound:
-        await ctx.send("❌ User not found or not banned.")
-    except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to unban users.")
-    except Exception as e:
-        await ctx.send(f"❌ Error: {str(e)}")
-
-@bot.command(name='setup')
-async def setup_bot(ctx):
-    if str(ctx.author.id) not in whitelist["admins"]:
-        return await ctx.send("No permission.")
-    
-    await setup_control_panel(ctx.guild)
-    await ctx.send("✅ Security bot control panel has been set up!")
-
-# ------------------- BOT TOKEN & RUN -------------------
+# ====================== RUN ======================
 if __name__ == "__main__":
     keep_alive()
     token = os.getenv("DISCORD_TOKEN")
     if not token:
-        print("❌ DISCORD_TOKEN environment variable not found!")
+        print("❌ DISCORD_TOKEN not found!")
     else:
         bot.run(token)
