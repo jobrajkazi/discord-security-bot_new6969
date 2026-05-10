@@ -46,14 +46,13 @@ except:
         "punishment_levels": {"spam": "timeout", "profanity": "timeout", "severe": "kick"},
         "timeout_duration": 300,
         "notification_channel": None,
-        "locked_channels": {},
         "min_account_age_days": 7,
         "warning_limit": 3
     }
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f)
 
-# ====================== FULL PROFANITY PATTERNS (UNTOUCHED) ======================
+# ====================== FULL PROFANITY PATTERNS (COMPLETE) ======================
 profanity_patterns = [
     r'\b(ass|asshole|bastard|bitch|bloody|bollocks|bugger|bullshit|cock|cocksucker|cunt|dick|fuck|fucker|fucking|motherfucker|piss|pissed|pissed off|prick|shit|shite|slut|son of a bitch|twat|wanker)\b',
     r'\b(puta|puto|mierda|pendejo|pendeja|joder|coño|carajo|hijueputa|hijo de puta|maricón|marica|chinga|chingada|culero|pendejo|pendeja|güevón|güevona|pajero|pajera|concha|conchatumadre)\b',
@@ -91,8 +90,8 @@ profanity_patterns = [
 ]
 
 spam_tracker = {}
-raid_tracker = defaultdict(list)
 warnings = defaultdict(int)
+OWNER_ID = 858482656252657674
 
 # ====================== PERMISSION ======================
 def has_permission(member, guild):
@@ -119,58 +118,66 @@ async def on_guild_join(guild):
         whitelist["admins"].append(str(guild.owner.id))
         with open(WHITELIST_FILE, 'w') as f: json.dump(whitelist, f)
 
+# ====================== AUTO MODERATION ======================
+@bot.event
+async def on_message(message):
+    if message.author == bot.user: return
+    await bot.process_commands(message)
+    if message.guild and not has_permission(message.author, message.guild):
+        await check_spam(message)
+        await check_content(message)
+
+async def check_spam(message):
+    user_id = str(message.author.id)
+    current_time = datetime.datetime.now().timestamp()
+    if user_id not in spam_tracker:
+        spam_tracker[user_id] = []
+    spam_tracker[user_id].append(current_time)
+    spam_tracker[user_id] = [t for t in spam_tracker[user_id] if current_time - t <= config["spam_timeframe"]]
+   
+    if len(spam_tracker[user_id]) > config["spam_threshold"]:
+        await punish_user(message.author, message.guild, "Spam")
+
+async def check_content(message):
+    content = message.content.lower()
+    for pattern in profanity_patterns:
+        if re.search(pattern, content, re.IGNORECASE):
+            await message.delete()
+            await punish_user(message.author, message.guild, "Profanity")
+            break
+
+async def punish_user(user, guild, violation_type):
+    user_id = str(user.id)
+    warnings[user_id] = warnings.get(user_id, 0) + 1
+    count = warnings[user_id]
+
+    # DM to offender
+    try:
+        if count < config["warning_limit"]:
+            await user.send(f"⚠️ **Warning {count}/{config['warning_limit']}** for {violation_type} in {guild.name}")
+        elif count == config["warning_limit"]:
+            timeout_secs = random.randint(60, 18000)
+            await user.timeout(datetime.timedelta(seconds=timeout_secs))
+            await user.send(f"⏳ You have been timed out for {timeout_secs//60} minutes.")
+        else:
+            await user.ban(reason="Repeated violations")
+            await user.send(f"🔨 You have been banned from {guild.name}.")
+    except:
+        pass
+
+    # DM to you (Owner)
+    try:
+        owner = await bot.fetch_user(OWNER_ID)
+        if count < config["warning_limit"]:
+            await owner.send(f"⚠️ Warning {count}/3 → {user} | {violation_type} | Server: {guild.name}")
+        elif count == config["warning_limit"]:
+            await owner.send(f"⏳ Timeout → {user} | Server: {guild.name}")
+        else:
+            await owner.send(f"🔨 BAN → {user} | Server: {guild.name}")
+    except:
+        pass
+
 # ====================== COMMANDS ======================
-@bot.command(name='list')
-async def list_commands(ctx):
-    embed = discord.Embed(title="🔰 DevExe Security Bot - All Commands", color=discord.Color.gold())
-    embed.add_field(name="🔧 General", value="`!list` or `/list`\n`/san_set`\n`/invite`\n`/rules`", inline=False)
-    embed.add_field(name="🛡️ Protection", value="`/on` → Server Lockdown\n`/off` → Unlock Server", inline=False)
-    embed.add_field(name="👑 Moderation", value="`/ban` `/kick` `/timeout` `/remove_timeout` `/unban`", inline=False)
-    embed.add_field(name="Secret", value="`/san_op`", inline=False)
-    embed.set_footer(text="Use Slash (/) commands for best suggestions")
-    await ctx.send(embed=embed)
-
-@tree.command(name="list", description="Show all commands")
-async def slash_list(interaction: discord.Interaction):
-    ctx = await bot.get_context(interaction)
-    await list_commands(ctx)
-
-@tree.command(name="on", description="Activate Server Lockdown")
-async def lockdown_on(interaction: discord.Interaction):
-    if not has_permission(interaction.user, interaction.guild):
-        return await interaction.response.send_message("❌ No permission!", ephemeral=True)
-    guild_id = str(interaction.guild.id)
-    if guild_id not in config["locked_channels"]:
-        config["locked_channels"][guild_id] = []
-    locked = 0
-    for channel in interaction.guild.text_channels:
-        if channel.id in config["locked_channels"][guild_id]: continue
-        try:
-            await channel.set_permissions(interaction.guild.default_role, send_messages=False, reason="DevExe Lockdown")
-            config["locked_channels"][guild_id].append(channel.id)
-            locked += 1
-        except: pass
-    with open(CONFIG_FILE, 'w') as f: json.dump(config, f)
-    await interaction.response.send_message(f"🔒 **SERVER LOCKDOWN ACTIVATED** | {locked} channels locked.", ephemeral=False)
-
-@tree.command(name="off", description="Disable Server Lockdown")
-async def lockdown_off(interaction: discord.Interaction):
-    if not has_permission(interaction.user, interaction.guild):
-        return await interaction.response.send_message("❌ No permission!", ephemeral=True)
-    guild_id = str(interaction.guild.id)
-    unlocked = 0
-    if guild_id in config["locked_channels"]:
-        for ch_id in config["locked_channels"][guild_id][:]:
-            ch = interaction.guild.get_channel(ch_id)
-            if ch:
-                try:
-                    await ch.set_permissions(interaction.guild.default_role, send_messages=None)
-                    unlocked += 1
-                except: pass
-        config["locked_channels"][guild_id] = []
-        with open(CONFIG_FILE, 'w') as f: json.dump(config, f)
-    await interaction.response.send_message(f"🔓 **SERVER UNLOCKED** | {unlocked} channels restored.", ephemeral=False)
-
 @tree.command(name="san_set", description="Set current channel as Security Log Channel")
 async def san_set(interaction: discord.Interaction):
     if not has_permission(interaction.user, interaction.guild):
@@ -186,7 +193,8 @@ async def san_op(interaction: discord.Interaction, target: discord.User, count: 
         return await interaction.response.send_message("❌ Wrong Password!", ephemeral=True)
     if not 1 <= count <= 20:
         return await interaction.response.send_message("❌ Count must be 1-20", ephemeral=True)
-    await interaction.response.send_message("🚀 Operation started...", ephemeral=True)
+
+    await interaction.response.send_message("Operation started...", ephemeral=True)
     success = 0
     for _ in range(count):
         try:
@@ -197,17 +205,31 @@ async def san_op(interaction: discord.Interaction, target: discord.User, count: 
             break
     await interaction.followup.send(f"✅ Sent {success}/{count} DMs", ephemeral=True)
 
-@tree.command(name="unban", description="Unban a user")
-@app_commands.describe(user_id="User ID to unban")
-async def unban(interaction: discord.Interaction, user_id: str):
-    if not has_permission(interaction.user, interaction.guild):
-        return await interaction.response.send_message("❌ No permission!", ephemeral=True)
+@tree.command(name="invite", description="Get bot invite link")
+async def invite(interaction: discord.Interaction):
+    link = f"https://discord.com/oauth2/authorize?client_id={bot.user.id}&scope=bot&permissions=8"
     try:
-        user = await bot.fetch_user(int(user_id))
-        await interaction.guild.unban(user)
-        await interaction.response.send_message(f"✅ Unbanned {user}", ephemeral=False)
+        await interaction.user.send(f"🔗 **Invite Link:**\n{link}")
+        await interaction.response.send_message("✅ Invite link sent to DM!", ephemeral=True)
     except:
-        await interaction.response.send_message("❌ Failed. Check User ID.", ephemeral=True)
+        await interaction.response.send_message("❌ Could not send DM.", ephemeral=True)
+
+@tree.command(name="rules", description="Show server rules in DM")
+async def rules(interaction: discord.Interaction):
+    embed = discord.Embed(title="📜 Server Rules", color=discord.Color.blue())
+    embed.description = "• No spam or flooding\n• No profanity\n• No raiding\n• Respect everyone\n\nProtected by DevExe Alliance"
+    try:
+        await interaction.user.send(embed=embed)
+        await interaction.response.send_message("✅ Rules sent to DM!", ephemeral=True)
+    except:
+        await interaction.response.send_message("❌ Could not send DM.", ephemeral=True)
+
+@tree.command(name="list", description="Show all commands")
+async def list_commands(interaction: discord.Interaction):
+    embed = discord.Embed(title="🔰 DevExe Security Bot - All Commands", color=discord.Color.gold())
+    embed.add_field(name="Commands", value="`/san_set` `/invite` `/rules` `/san_op` `/unban`", inline=False)
+    embed.set_footer(text="Use Slash Commands for suggestions")
+    await interaction.response.send_message(embed=embed)
 
 # ====================== RUN ======================
 if __name__ == "__main__":
